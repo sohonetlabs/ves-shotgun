@@ -92,7 +92,12 @@ class ShotgunVES(Shotgun):
         if entry is None:
             return None
         else:
-            self.delete(self.shotgun_submission_entity, entry['id'])
+            # Set entry as withdrawn
+            self.update(
+                self.shotgun_submission_entity,
+                entry['id'],
+                {'sg_status_list': 'wdraw'}
+            )
             return entry['id']
 
     def get_vetting_check_list(self):
@@ -120,11 +125,11 @@ class ShotgunVES(Shotgun):
                 'Entry %s has been deleted, retiring from shotgun '
                 % str(entry.entryNum)
             )
-            retire_result = self.retire_entry(entry)
+            retire_result = self.retire_entry(entry.entry_num)
             if retire_result:
                 self.log('Retired %s from shotgun ' % entry.entryNum)
             else:
-                self.log(
+                self.exception(
                     'Could not retire %s from shotgun ' % entry.entryNum
                 )
             return 1
@@ -148,6 +153,10 @@ class ShotgunVES(Shotgun):
 
         user_login = re.sub(r'\s+', '', _name_lower)
         user_login = user_login.replace('.', '').replace('-', '')
+
+        # Shotgun needs to have non unicode characters or else is replaces
+        # then with a space
+        user_login = user_login.encode('ascii', errors='ignore')
 
         user_data['login'] = user_login
         user_info = self.find_one(
@@ -215,9 +224,7 @@ class ShotgunVES(Shotgun):
         if entry.entrant5:
             entrants.append((entry.entrant5, model_identifier))
 
-        entrant_pos = 0
         for entrant, model_identifier in entrants:
-            entrant_pos += 1
             job_title_or_credit = getattr(
                 entry, 'e%sjobTitleOrCredit' % model_identifier, '')
             url = getattr(
@@ -247,7 +254,7 @@ class ShotgunVES(Shotgun):
                 'sg_job_title': job_title_or_credit,
                 'sg_state': utils.get_clean_state(entrant.stateProvince),
                 'sg_phone': entrant.primaryPhone,
-                'sg_entrant_number': entrant_pos,
+                'sg_entrant_number': model_identifier,
                 'sg_credit_url': url_data,
             }
             entrant_info = self.get_user(entrant_data)
@@ -256,11 +263,11 @@ class ShotgunVES(Shotgun):
                 entrant_list.extend(
                     [{'type': 'HumanUser', 'id': entrant_info['id']}])
 
-            entrant_dict['entrant_%s' % entrant_pos] = {
+            entrant_dict['entrant_%s' % model_identifier] = {
                 'type': 'HumanUser', 'id': entrant_info['id']
             }
-            _jt_index = 'entrant_%s_job_title' % entrant_pos
-            _url_index = 'entrant_%s_url' % entrant_pos
+            _jt_index = 'entrant_%s_job_title' % model_identifier
+            _url_index = 'entrant_%s_url' % model_identifier
 
             entrant_dict[_jt_index] = job_title_or_credit
             entrant_dict[_url_index] = url_data
@@ -463,6 +470,10 @@ class ShotgunVES(Shotgun):
     def update_entry_details(self, entry):
         self.log('Updating entry %s details' % entry)
 
+        if self.update_entry_status(entry):
+            # Entry has been deleted or marked as do not continue
+            return
+
         category = self.get_category(entry.entryNum.category.catNum)
         vetting_list = self.get_vetting_check_list()
 
@@ -587,8 +598,6 @@ class ShotgunVES(Shotgun):
             )
             return 1
 
-        self.update_run_times(entry)
-
         entry_files = EntryFiles(entry)
         entry_files.findFiles()
 
@@ -652,9 +661,6 @@ class ShotgunVES(Shotgun):
                     },
                     self.get_version_fields()
                 )
-
-            #self.log("VersionInfo:")
-            #self.log(version_info)
 
             sg_uploaded_movie = version_info['sg_uploaded_movie']
 
@@ -768,11 +774,13 @@ class ShotgunVES(Shotgun):
                 % (entry.entryNum, entry_filename)
             )
 
+        self.update_run_times(entry)
+
     def update_run_times(self, entry):
         self.log('Updating %s run times ' % entry.entryNum)
 
         entry_totals = self._find_in_project(
-            self.shotgun_version_entity,
+            self.shotgun_submission_entity,
             [['code', 'is', str(entry.entryNum)]],
             ['sg_entry_run_time', 'sg_ba_run_time', 'sg_total_run_time']
         )
@@ -782,17 +790,17 @@ class ShotgunVES(Shotgun):
 
         if et_entry_runtime is not None and et_ba_runtime is None:
             self.update(
-                self.shotgun_version_entity, entry_totals['id'],
+                self.shotgun_submission_entity, entry_totals['id'],
                 {'sg_total_run_time': et_entry_runtime}
             )
         elif et_entry_runtime is None and et_ba_runtime is not None:
             self.update(
-                self.shotgun_version_entity, entry_totals['id'],
+                self.shotgun_submission_entity, entry_totals['id'],
                 {'sg_total_run_time': et_ba_runtime}
             )
         elif et_entry_runtime is not None and et_ba_runtime is not None:
             self.update(
-                self.shotgun_version_entity, entry_totals['id'],
+                self.shotgun_submission_entity, entry_totals['id'],
                 {'sg_total_run_time': (et_entry_runtime + et_ba_runtime)}
             )
 
